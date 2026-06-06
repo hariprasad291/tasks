@@ -1,0 +1,39 @@
+stages:
+  - build
+  - test
+  - docker_build&push
+  - deploy
+  - integration_test
+
+varialbes:
+  AWS_REGION: "ap-south-1"
+  CLUSTER_NAME: "eks vclsuter"
+  IMAGE_TAG: "${CI_PIPELINE_ID}-${CI_ENVIRONMENT_NAME}"
+
+build:
+  stage: build
+  image: maven:3.9-eclipse
+  script: 
+    - mvn clean package
+  artifacts:
+    paths:
+      - target/*.jar
+
+test:
+  stage: test
+  image:
+  before_scrit:
+  script:
+  environment:
+  varibles:
+
+.job_template: & job_temp
+  stage: test
+  image: apine:fse
+  service:
+   - postgres
+  script:
+   sh fsfsfs
+
+test:
+  <<: *jobtemp

@@ -1,0 +1,18 @@
+apiVCersion: autoscaling/v1
+kind: horizontalPodAutoscaler
+metadata:
+  name: java-hpa
+  metadata:
+    app: alb
+    alb.ingress.kubernetes.io/schema: internet-faced
+spec: 
+  scaletargetref:
+    apiver:
+    kind:
+    name:
+  minreplicas: 
+  maxreplicas:
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu

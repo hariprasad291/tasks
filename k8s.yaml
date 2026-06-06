@@ -1,0 +1,89 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: java-app
+  labels:
+    app: java-app
+spec:
+  replicas: 2
+
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+      maxSurge: 1
+
+  selector:
+    matchLabels:
+      app: java-app
+
+  template:
+    metadata:
+      labels:
+        app: java-app
+
+    spec:
+      serviceAccountName: default
+
+      securityContext:
+        runAsUser: 1000
+        runAsNonRoot: true
+
+      containers:
+        - name: java-app
+          image: <ACCOUNT_ID>.dkr.ecr.ap-south-1.amazonaws.com/java-app:latest
+          imagePullPolicy: Always
+
+          ports:
+            - containerPort: 8080
+
+          env:
+            - name: SPRING_PROFILES_ACTIVE
+              valueFrom:
+                configMapKeyRef:
+                  name: java-app-config
+                  key: SPRING_PROFILE
+
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: java-app-secret
+                  key: DB_PASSWORD
+
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "512Mi"
+            limits:
+              cpu: "500m"
+              memory: "1Gi"
+
+          readinessProbe:
+            httpGet:
+              path: /actuator/health
+              port: 8080
+            initialDelaySeconds: 20
+            periodSeconds: 10
+
+          livenessProbe:
+            httpGet:
+              path: /actuator/health
+              port: 8080
+            initialDelaySeconds: 30
+            periodSeconds: 15
+
+          startupProbe:
+            httpGet:
+              path: /actuator/health
+              port: 8080
+            failureThreshold: 30
+            periodSeconds: 10
+
+          volumeMounts:
+            - name: config-volume
+              mountPath: /app/config
+
+      volumes:
+        - name: config-volume
+          configMap:
+            name: java-app-config

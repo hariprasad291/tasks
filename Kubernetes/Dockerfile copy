@@ -1,0 +1,65 @@
+# =========================
+# STAGE 1: BUILD STAGE
+# =========================
+FROM maven:3.9-eclipse-temurin-17 AS builder
+
+# Metadata
+LABEL maintainer="your-name@example.com"
+LABEL app="java-app"
+
+# Build arguments (only available during build)
+ARG APP_NAME=java-app
+ARG JAR_FILE=target/*.jar
+
+# Set working directory
+WORKDIR /build
+
+# Copy only required files first (for caching)
+COPY pom.xml .
+
+# Download dependencies (cache layer)
+RUN mvn dependency:go-offline
+
+# Copy source code
+COPY src ./src
+
+# Build the application
+RUN mvn clean package -DskipTests
+
+# =========================
+# STAGE 2: RUNTIME STAGE
+# =========================
+FROM eclipse-temurin:17-jdk-jammy
+
+# Environment variables
+ENV APP_HOME=/app \
+    APP_USER=appuser \
+    JAVA_OPTS="-Xms256m -Xmx512m"
+
+# Create non-root user
+RUN useradd -m $APP_USER
+
+# Set working directory
+WORKDIR $APP_HOME
+
+# Copy jar from builder stage
+COPY --from=builder /build/target/*.jar app.jar
+
+# Change ownership to non-root user
+RUN chown -R $APP_USER:$APP_USER $APP_HOME
+
+# Switch to non-root user (SECURITY BEST PRACTICE)
+USER $APP_USER
+
+# Expose application port
+EXPOSE 8080
+
+# Healthcheck (optional but recommended)
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s \
+CMD curl -f http://localhost:8080/actuator/health || exit 1
+
+# Default command (can be overridden)
+CMD ["java", "-jar", "app.jar"]
+
+# Entry point (preferred for fixed execution)
+ENTRYPOINT ["sh", "-c", "java $JAVA_OPTS -jar app.jar"]

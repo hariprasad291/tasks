@@ -1,0 +1,202 @@
+pipeline {
+    agent any
+
+    options {
+        buildDiscarder(logRotator(numToKeepStr: '20'))
+        timeout(time: 60, unit: 'MINUTES')
+        disableConcurrentBuilds()
+        timestamps()
+        ansiColor('xterm')
+    }
+
+    parameters {
+        string(name: 'BRANCH', defaultValue: 'main', description: 'Git branch')
+        choice(name: 'ENV', choices: ['dev', 'staging', 'prod'], description: 'Environment')
+        booleanParam(name: 'RUN_TESTS', defaultValue: true, description: 'Run tests')
+    }
+
+    environment {
+        AWS_REGION = "ap-south-1"
+        CLUSTER_NAME = "prod-eks-cluster"
+        IMAGE_NAME = "python-app"
+        IMAGE_TAG = "${BUILD_NUMBER}-${params.ENV}"
+        DOCKER_BUILDKIT = "1"
+    }
+
+    stages {
+
+        // ========================
+        // CHECKOUT
+        // ========================
+        stage('Checkout') {
+            steps {
+                git branch: "${params.BRANCH}", url: 'https://github.com/your-repo/python-app.git'
+            }
+        }
+
+        // ========================
+        // BUILD
+        // ========================
+        stage('Build') {
+            steps {
+                sh '''
+                python3 -m venv venv
+                . venv/bin/activate
+                pip install --upgrade pip
+                pip install -r requirements.txt
+                '''
+            }
+        }
+
+        // ========================
+        // TEST (Parallel)
+        // ========================
+        stage('Test') {
+            when { expression { params.RUN_TESTS } }
+
+            parallel {
+
+                stage('Unit Tests') {
+                    steps {
+                        sh '. venv/bin/activate && pytest --junitxml=report.xml'
+                    }
+                    post {
+                        always {
+                            junit 'report.xml'
+                        }
+                    }
+                }
+
+                stage('Lint') {
+                    steps {
+                        sh '. venv/bin/activate && pip install flake8 && flake8 .'
+                    }
+                }
+
+                stage('Security Scan') {
+                    steps {
+                        sh '. venv/bin/activate && pip install pip-audit && pip-audit || true'
+                    }
+                }
+
+                stage('Code Quality') {
+                    steps {
+                        sh '''
+                        sonar-scanner \
+                        -Dsonar.projectKey=python-app \
+                        -Dsonar.sources=. \
+                        -Dsonar.host.url=$SONAR_HOST_URL \
+                        -Dsonar.login=$SONAR_TOKEN
+                        '''
+                    }
+                }
+            }
+        }
+
+        // ========================
+        // DOCKER BUILD + SCAN
+        // ========================
+        stage('Docker Build & Scan') {
+            steps {
+                sh '''
+                docker build -t ${IMAGE_NAME}:${IMAGE_TAG} .
+                
+                # Container security scan
+                docker run --rm aquasec/trivy image ${IMAGE_NAME}:${IMAGE_TAG} || true
+                '''
+            }
+        }
+
+        // ========================
+        // PUSH TO ECR
+        // ========================
+        stage('Publish') {
+            steps {
+                script {
+                    def ACCOUNT_ID = sh(
+                        script: "aws sts get-caller-identity --query Account --output text",
+                        returnStdout: true
+                    ).trim()
+
+                    env.ECR_REPO = "${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${IMAGE_NAME}"
+                }
+
+                sh '''
+                aws ecr describe-repositories --repository-names ${IMAGE_NAME} || \
+                aws ecr create-repository --repository-name ${IMAGE_NAME}
+
+                aws ecr get-login-password --region ${AWS_REGION} \
+                | docker login --username AWS --password-stdin ${ECR_REPO}
+
+                docker tag ${IMAGE_NAME}:${IMAGE_TAG} ${ECR_REPO}:${IMAGE_TAG}
+                docker push ${ECR_REPO}:${IMAGE_TAG}
+                '''
+            }
+        }
+
+        // ========================
+        // APPROVAL (ONLY PROD)
+        // ========================
+        stage('Approval') {
+            when { expression { params.ENV == 'prod' } }
+            steps {
+                timeout(time: 5, unit: 'MINUTES') {
+                    input message: "Deploy to PRODUCTION?", ok: "Approve"
+                }
+            }
+        }
+
+        // ========================
+        // DEPLOY
+        // ========================
+        stage('Deploy') {
+            steps {
+                sh '''
+                aws eks update-kubeconfig --name ${CLUSTER_NAME} --region ${AWS_REGION}
+
+                sed -i 's|IMAGE_TAG|${IMAGE_TAG}|g' k8s/deployment.yaml
+
+                kubectl apply -f k8s/
+
+                kubectl rollout status deployment/python-app --timeout=120s
+                '''
+            }
+        }
+
+        // ========================
+        // SMOKE / INTEGRATION TEST
+        // ========================
+        stage('Integration Tests') {
+            steps {
+                sh '''
+                echo "Running integration tests..."
+
+                APP_URL=$(kubectl get svc python-app-service -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
+
+                sleep 40
+
+                curl -f http://$APP_URL/health || exit 1
+                '''
+            }
+        }
+    }
+
+    // ========================
+    // POST
+    // ========================
+    post {
+
+        always {
+            archiveArtifacts artifacts: '**/*.log', allowEmptyArchive: true
+            cleanWs()
+        }
+
+        success {
+            echo "✅ Deployment Successful"
+        }
+
+        failure {
+            echo "❌ Pipeline Failed"
+        }
+    }
+}
